@@ -33,52 +33,39 @@ class ServingLayer:
         
         golden_query = """
         CREATE OR REPLACE TABLE golden_table AS
-        WITH scored_records AS (
-            SELECT 
-                *,
-                (CASE WHEN company_name IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN address IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN city IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN country IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN website IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN certifications IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN industry_tags IS NOT NULL THEN 1 ELSE 0 END +
-                 CASE WHEN founded_year IS NOT NULL THEN 1 ELSE 0 END) as completeness_score
-            FROM clusters
-        ),
-        ranked_records AS (
+        WITH cluster_stats AS (
             SELECT 
                 cluster_id,
-                unique_id,
-                company_name,
-                address,
-                city,
-                country,
-                website,
-                industry_tags,
-                certifications,
-                employees,
-                founded_year,
-                source_dataset,
-                scraped_at,
-                ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY completeness_score DESC, unique_id ASC) as rank
-            FROM scored_records
+                mode(company_name) as primary_company_name,
+                mode(address) as canonical_address,
+                mode(city) as canonical_city,
+                mode(website) as primary_website,
+                mode(industry_tags) as canonical_industry,
+                mode(certifications) as canonical_certifications,
+                mode(employees) as canonical_employees,
+                mode(founded_year) as canonical_founded_year,
+                ARRAY_AGG(DISTINCT country) FILTER (WHERE country IS NOT NULL) as operating_countries,
+                ARRAY_AGG(DISTINCT company_name) FILTER (WHERE company_name IS NOT NULL) as all_names,
+                MAX(scraped_at) as latest_scraped_at,
+                mode(source_dataset) as primary_source
+            FROM clusters
+            GROUP BY cluster_id
         )
         SELECT 
             cluster_id as canonical_id,
-            company_name,
-            address,
-            city,
-            country,
-            website,
-            industry_tags,
-            certifications,
-            employees,
-            founded_year,
-            source_dataset,
-            scraped_at
-        FROM ranked_records
-        WHERE rank = 1
+            primary_company_name,
+            list_filter(all_names, x -> x <> primary_company_name) as aliases,
+            canonical_address as address,
+            canonical_city as city,
+            operating_countries,
+            primary_website,
+            canonical_industry as industry_tags,
+            canonical_certifications as certifications,
+            canonical_employees as employees,
+            canonical_founded_year as founded_year,
+            primary_source as source_dataset,
+            latest_scraped_at as scraped_at
+        FROM cluster_stats
         """
         
         self.con.execute(golden_query)

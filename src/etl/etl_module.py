@@ -67,7 +67,7 @@ class ETLLayer:
             self.con.execute(f"""
                 CREATE OR REPLACE VIEW std_csv AS
                 SELECT 
-                    uuid() as raw_id,
+                    md5(concat_ws('_', 'csv', row_number() over(), {safe(['company_name', 'scraped_name', 'name'])})) as raw_id,
                     {safe(['company_name', 'scraped_name', 'name'])} as raw_company_name,
                     {safe(['website', 'url'])} as raw_website,
                     {safe(['country', 'country_code'])} as raw_country,
@@ -101,7 +101,7 @@ class ETLLayer:
             self.con.execute(f"""
                 CREATE OR REPLACE VIEW std_json AS
                 SELECT 
-                    uuid() as raw_id,
+                    md5(concat_ws('_', 'jsonl', row_number() over(), {safe(['company_name', 'scraped_name', 'name'])})) as raw_id,
                     {safe(['company_name', 'scraped_name', 'name'])} as raw_company_name,
                     {safe(['website', 'url'])} as raw_website,
                     {safe(['country', 'location.country', 'country_code'])} as raw_country,
@@ -130,7 +130,7 @@ class ETLLayer:
             self.con.execute(f"""
                 CREATE OR REPLACE VIEW std_parquet AS
                 SELECT 
-                    uuid() as raw_id,
+                    md5(concat_ws('_', 'parquet', row_number() over(), {safe(['company_name', 'scraped_name', 'name'])})) as raw_id,
                     {safe(['company_name', 'scraped_name', 'name'])} as raw_company_name,
                     {safe(['website', 'url'])} as raw_website,
                     {safe(['country', 'country_code'])} as raw_country,

@@ -1,0 +1,17 @@
+# Data
+data/
+*.parquet
+*.npy
+*.json
+*.npy
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# System
+.DS_Store
