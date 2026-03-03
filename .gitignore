@@ -16,3 +16,5 @@ __pycache__/
 # System
 .DS_Store
 free_company_dataset (2).csv
+
+.env
