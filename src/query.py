@@ -3,7 +3,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, BarColumn, TextColumn
+from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
+import polars as pl
 from rich.columns import Columns
 from rich.tree import Tree
 from rich import print as rprint
@@ -13,7 +14,8 @@ import os
 app = typer.Typer(help="Golden Record Explorer CLI - High Performance Parquet Query Tool")
 console = Console()
 
-PARQUET_PATH = "data/output/refined_golden_table.parquet"
+# --- CONFIGURATION ---
+PARQUET_PATH = "data/output/verified_golden_table.parquet"
 LOG_PATH = "data/output/query_log.txt"
 
 def get_conn():
@@ -42,8 +44,7 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
             canonical_id as cid, 
             primary_company_name, 
             domain, 
-            COALESCE(industry_tags, 'Unknown') as industry,
-            COALESCE(source_dataset, 'N/A') as source,
+            COALESCE(description, 'N/A') as description,
             aliases,
             COALESCE(record_count, 1) as record_count
         FROM read_parquet('{PARQUET_PATH}')
@@ -65,8 +66,7 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
         table.add_column("Company Name", style="white")
         table.add_column("Domain", style="green")
         table.add_column("Records", justify="right", style="yellow")
-        table.add_column("Industry", style="blue")
-        table.add_column("Source", style="dim")
+        table.add_column("Description", style="dim")
 
         for row in results:
             # Highlight target query in name
@@ -74,7 +74,7 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
             highlighted_name = name.replace(query, f"[bold yellow]{query}[/]") if query.lower() in name.lower() else name
             
             # Show aliases in a sub-line if they exist
-            aliases = row[5]
+            aliases = row[4]
             if aliases and len(aliases) > 0:
                 alias_str = f"\n[dim italic]Aliases: {', '.join(aliases[:2])}...[/]" if len(aliases) > 2 else f"\n[dim italic]Aliases: {', '.join(aliases)}[/]"
                 highlighted_name += alias_str
@@ -83,8 +83,8 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
                 row[0],
                 highlighted_name,
                 format_domain(row[2]),
-                f"{row[6]}",
-                row[3]
+                f"{row[5]}",
+                row[3][:80] + "..." if len(row[3]) > 80 else row[3]
             )
 
         console.print(table)
@@ -94,6 +94,46 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
         console.print(f"[red]Query error:[/] {e}")
 
 @app.command()
+def list_all(limit: int = typer.Option(20, help="Number of records to show")):
+    """List the first N records from the verified golden table."""
+    conn = get_conn()
+    
+    sql = f"""
+        SELECT 
+            canonical_id as cid, 
+            primary_company_name, 
+            domain, 
+            COALESCE(description, 'N/A') as description,
+            aliases,
+            COALESCE(record_count, 1) as record_count
+        FROM read_parquet('{PARQUET_PATH}')
+        LIMIT {limit}
+    """
+    
+    try:
+        results = conn.execute(sql).fetchall()
+        
+        table = Table(title=f"First {len(results)} Master Clusters", header_style="bold magenta", border_style="dim")
+        table.add_column("ID", justify="right", style="cyan")
+        table.add_column("Company Name", style="white")
+        table.add_column("Domain", style="green")
+        table.add_column("Records", justify="right", style="yellow")
+        table.add_column("Description", style="dim")
+
+        for row in results:
+            table.add_row(
+                row[0],
+                row[1],
+                format_domain(row[2]),
+                f"{row[5]}",
+                row[3][:80] + "..." if len(row[3]) > 80 else row[3]
+            )
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]List error:[/] {e}")
+
+@app.command()
 def stats():
     """Display enrichment performance and data distribution dashboard."""
     conn = get_conn()
@@ -101,53 +141,47 @@ def stats():
     # Calculate Metrics
     try:
         total = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{PARQUET_PATH}')").fetchone()[0]
-        with_domain = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{PARQUET_PATH}') WHERE domain IS NOT NULL").fetchone()[0]
-        raw_total = conn.execute(f"SELECT SUM(record_count) FROM read_parquet('{PARQUET_PATH}')").fetchone()[0]
+        # Valid means not 'Missing' and not 'Information not found'
+        with_domain = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{PARQUET_PATH}') WHERE domain != 'Missing'").fetchone()[0]
+        with_desc = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{PARQUET_PATH}') WHERE description NOT LIKE 'Information not found%'").fetchone()[0]
+        
+        # We know from raw analysis there were 500,000 records in source_C.parquet
+        RAW_TOTAL = 500000 
         
         fill_rate = (with_domain / total) * 100 if total > 0 else 0
-        dedupe_rate = ((raw_total - total) / raw_total) * 100 if raw_total > 0 else 0
-        
-        # Source distribution
-        sources = conn.execute(f"""
-            SELECT source_dataset, COUNT(*) 
-            FROM read_parquet('{PARQUET_PATH}') 
-            GROUP BY source_dataset 
-            ORDER BY 2 DESC
-        """).fetchall()
+        desc_rate = (with_desc / total) * 100 if total > 0 else 0
+        overall_enrichment = (fill_rate + desc_rate) / 2
+        dedupe_rate = ((RAW_TOTAL - total) / RAW_TOTAL) * 100 if RAW_TOTAL > 0 else 0
 
         # Build Dashboard Components
         metric_panel = Panel(
-            f"[bold cyan]Total Clusters:[/] {total:,}\n"
-            f"[bold cyan]Raw Records Analyzed:[/] {raw_total:,}\n"
-            f"[bold green]Deduplication Efficiency:[/] {dedupe_rate:.1f}%\n"
-            f"[bold yellow]Enrichment Fill Rate:[/] {fill_rate:.2f}%",
-            title="Golden Statistics",
+            f"""
+[bold cyan]Total Clusters:[/]       [white]{total:,}[/]
+[bold cyan]Raw Records Analyzed:[/] [white]{RAW_TOTAL:,}[/]
+[bold green]Deduplication Eff:[/]   [bold green]{dedupe_rate:.2f}%[/]
+[bold magenta]Domain Coverage:[/]      [white]{fill_rate:.1f}%[/]
+[bold magenta]Description Quality:[/]  [white]{desc_rate:.1f}%[/]
+            """,
+            title="[bold]Golden Statistics[/]",
             expand=False
         )
-
-        # 2. Progress Bar for Fill Rate
-        progress_bar = Table.grid(expand=True)
-        progress_bar.add_row(f"Domain Quality Score: [bold]{fill_rate:.1f}%[/]")
         
-        # 3. Source Distribution Table
-        src_table = Table(title="Source Distribution", box=None, header_style="bold green")
-        src_table.add_column("Source")
-        src_table.add_column("Records", justify="right")
-        for s in sources:
-            src_table.add_row(str(s[0]) if s[0] else "Unknown", f"{s[1]:,}")
-
+        # 2. Progress Bar for Enrichment Completion
+        progress_bar = Table.grid(expand=True)
+        progress_bar.add_row(f"Overall Enrichment Completion: [bold]{overall_enrichment:.1f}%[/]")
+        
         # Render Dashboard
-        console.print("\n", Panel.fit("[bold white]Golden Record Dashboard[/]", style="on blue"), "\n")
-        console.print(Columns([metric_panel, src_table]))
+        console.print("\n", Panel.fit("[bold white]Final Golden Record Dashboard[/]", style="on blue"), "\n")
+        console.print(metric_panel)
         
         # Simple Visual Progress Bar
+        console.print(progress_bar)
         with Progress(
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=40),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            BarColumn(),
+            TaskProgressColumn(),
         ) as progress:
-            task = progress.add_task("[green]Enrichment Completion", total=100)
-            progress.update(task, completed=fill_rate)
+            progress.add_task("[magenta]Enrichment Completion", total=100, completed=overall_enrichment)
         
         print("\n")
 

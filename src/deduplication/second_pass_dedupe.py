@@ -43,29 +43,83 @@ def run_second_pass(input_path, output_path):
         match_cache="data/second_pass_matches_v4.parquet"
     )
     
-    # 3. Clustering
-    logger.info("Building second-pass clusters (NetworkX)...")
+    # 3. Graph-Based Clustering (Final Merging Strategy)
+    logger.info("Building Final Consolidation Graph (Fuzzy + Exact + Alias + Domain)...")
     G = nx.Graph()
     G.add_nodes_from(ids)
+
+    # Rule A: Fuzzy Similarity (Deep Vector Search)
     G.add_edges_from(match_pairs)
     
-    # NEW: Safety net - Force merge records with EXACT SAME primary names
-    # This prevents the K-search limit from leaving duplicates
-    name_to_ids = {}
-    for i, name in enumerate(names):
-        n = name.lower().strip()
-        if n not in name_to_ids: name_to_ids[n] = []
-        name_to_ids[n].append(ids[i])
-        
-    for group_ids in name_to_ids.values():
-        for j in range(len(group_ids) - 1):
-            G.add_edge(group_ids[j], group_ids[j+1])
+    # Rule B: Suffix-Aware Core Name Bridge
+    # Clean suffixes (GmbH, Ltd, etc.) to find the core company name
+    import re
+    suffix_pattern = r'\b(inc|ltd|gmbh|ag|sa|co|corp|group|llc|plc|solutions)\b\.*$'
     
+    def get_core_name(name):
+        n = name.lower().strip()
+        # Remove suffixes repeatedly (e.g. 'Group Ltd')
+        prev_n = None
+        while n != prev_n:
+            prev_n = n
+            n = re.sub(suffix_pattern, '', n).strip()
+            # Also handle common punctuation
+            n = n.rstrip('., ')
+        return n
+
+    core_name_to_ids = {}
+    for i, name in enumerate(names):
+        cn = get_core_name(name)
+        if len(cn) > 3: # Avoid merging very short names like 'AB'
+            if cn not in core_name_to_ids: core_name_to_ids[cn] = []
+            core_name_to_ids[cn].append(ids[i])
+            
+    for cn, group in core_name_to_ids.items():
+        if len(group) > 1:
+            logger.debug(f"Suffix Bridge: Merging {cn} group: {group}")
+            for j in range(len(group) - 1):
+                G.add_edge(group[j], group[j+1])
+
+    # Rule C: Alias Overlap (Transitive Consistency)
+    # If Record A's alias matches Record B's name/alias, they are the same entity
+    alias_map = {}
+    for i, row in df.iterrows():
+        tid = row['temp_id']
+        variants = set()
+        variants.add(str(row['primary_company_name']).lower().strip())
+        if 'aliases' in df.columns and isinstance(row['aliases'], list):
+            for a in row['aliases']:
+                if a: variants.add(str(a).lower().strip())
+        
+        for v in variants:
+            if v not in alias_map: alias_map[v] = []
+            alias_map[v].append(tid)
+
+    for group in alias_map.values():
+        if len(group) > 1:
+            for j in range(len(group) - 1):
+                G.add_edge(group[j], group[j+1])
+
+    # Rule D: Domain-Based Anchor (For records that already have domains)
+    if 'primary_website' in df.columns:
+        domain_map = {}
+        for i, row in df.iterrows():
+            d = str(row['primary_website']).lower().strip()
+            if d and d != 'nan' and '.' in d:
+                if d not in domain_map: domain_map[d] = []
+                domain_map[d].append(row['temp_id'])
+        
+        for group in domain_map.values():
+            if len(group) > 1:
+                for j in range(len(group) - 1):
+                    G.add_edge(group[j], group[j+1])
+    
+    # Finalize Clusters
     clusters = list(nx.connected_components(G))
     cluster_map = {node_id: f"m_{i:06d}" for i, cluster in enumerate(clusters) for node_id in cluster}
     df['master_cluster_id'] = df['temp_id'].map(cluster_map)
     
-    # 4. Platinum-Tier Aggregation
+    # 4. Final Aggregation
     # Merging the already merged clusters
     con.register("df_second_pass", df)
     
@@ -79,7 +133,7 @@ def run_second_pass(input_path, output_path):
         SELECT 
             master_cluster_id as canonical_id,
             MODE(primary_company_name) as primary_company_name,
-            -- Combine existing aliases with primary names that are now being merged
+            -- Aggregate all variations found across all merged records
             LIST_DISTINCT(
                 flatten(ARRAY_AGG(aliases)) || ARRAY_AGG(primary_company_name)
             ) as all_variations,

@@ -4,6 +4,7 @@ import kagglehub
 import os
 import logging
 import time
+import networkx as nx
 from duckduckgo_search import DDGS
 from urllib.parse import urlparse
 from rapidfuzz import process, utils as fuzz_utils
@@ -11,10 +12,10 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 # --- CONFIGURATION ---
-INPUT_PARQUET = "data/output/golden_table.parquet"
+INPUT_PARQUET = "data/output/refined_golden_table.parquet"
 OUTPUT_PARQUET = "data/output/enriched_golden_table.parquet"
 RAW_DIR = "data/raw"
-BULK_CSV_22M = os.path.join(os.path.dirname(os.path.dirname(__file__)), "free_company_dataset (2).csv")
+BULK_CSV_22M = os.path.join(RAW_DIR, "free_company_dataset (2).csv")
 
 # Kaggle Datasets
 KAGGE_7M = "peopledatalabssf/free-7-million-company-dataset"
@@ -129,12 +130,12 @@ class MegaEnricher:
         """Scan all 3 bulk sources and build Automotive/Global reference sets."""
         logger.info("Scanning bulk sources (22M + Kaggle) into Unified Reference...")
         
-        # 1. Load 22M CSV
-        lf_22m = pl.scan_csv(BULK_CSV_22M, quote_char=None, truncate_ragged_lines=True, infer_schema_length=0, encoding="utf8-lossy").select([
-            pl.col("name").alias("ref_name"),
-            pl.col("website").alias("ref_domain"),
-            pl.col("industry").alias("ref_industry")
-        ])
+        # 1. Load 22M CSV (SKIPPED for memory safety)
+        # lf_22m = pl.scan_csv(BULK_CSV_22M, quote_char=None, truncate_ragged_lines=True, infer_schema_length=0, encoding="utf8-lossy").select([
+        #     pl.col("name").alias("ref_name"),
+        #     pl.col("website").alias("ref_domain"),
+        #     pl.col("industry").alias("ref_industry")
+        # ])
         
         # 2. Load Kaggle 7M (Assuming standard names in that dataset)
         # Note: We look for CSVs in the downloaded path
@@ -153,8 +154,8 @@ class MegaEnricher:
             pl.col("industry").alias("ref_industry")
         ])
 
-        # Combine all
-        lf_unified = pl.concat([lf_22m, lf_7m, lf_big]).unique(subset=["ref_name"]).drop_nulls(subset=["ref_name", "ref_domain"])
+        # Combine all (excluding 22M CSV)
+        lf_unified = pl.concat([lf_7m, lf_big]).unique(subset=["ref_name"]).drop_nulls(subset=["ref_name", "ref_domain"])
         
         # Stage A: Automotive Subset (Fuzzy target)
         self.ref_auto = lf_unified.filter(
@@ -165,6 +166,66 @@ class MegaEnricher:
         self.ref_global = lf_unified
         
         logger.info(f"Reference logic built. Automotive sample size: {len(self.ref_auto)}")
+
+    def run_stage_bulk_csv_chunked(self, chunk_size=3_000_000):
+        """Memory-safe chunked scan of the 22M CSV for missing domains."""
+        logger.info(f"Stage 1.5: Chunked Scan of 22M CSV (Chunk Size: {chunk_size})...")
+        mask_missing = (pl.col("domain").is_null()) | (pl.col("domain") == "")
+        missing_df = self.df.filter(mask_missing)
+        
+        if missing_df.height == 0: return
+        
+        # Create a lookup map for missing names (clean -> original)
+        missing_map = {n.lower().strip(): n for n in missing_df["primary_company_name"].to_list()}
+        matches_found = {}
+
+        try:
+            reader = pl.read_csv_batched(
+                BULK_CSV_22M, 
+                quote_char=None, 
+                truncate_ragged_lines=True, 
+                infer_schema_length=0, 
+                encoding="utf8-lossy"
+            )
+            
+            chunk_idx = 0
+            while True:
+                batches = reader.next_batches(5) # 5 batches per iteration
+                if not batches: break
+                
+                chunk_idx += 1
+                df_chunk = pl.concat(batches).select([
+                    pl.col("name").alias("ref_name"),
+                    pl.col("website").alias("ref_domain")
+                ]).drop_nulls()
+                
+                # Fast inner join/overlap check
+                df_chunk = df_chunk.with_columns(clean_name(pl.col("ref_name")).alias("match_key"))
+                
+                # Check for hits
+                for row in df_chunk.iter_rows(named=True):
+                    key = row["match_key"]
+                    if key in missing_map and key not in matches_found:
+                        matches_found[key] = row["ref_domain"]
+                
+                # Early exit if all found
+                if len(matches_found) == len(missing_map): break
+                
+                if chunk_idx % 2 == 0:
+                    logger.info(f"Processed ~{chunk_idx * 5}M rows... Found: {len(matches_found)}/{len(missing_map)}")
+
+            # Update main DF
+            if matches_found:
+                self.df = self.df.with_columns(
+                    pl.struct(["primary_company_name", "domain"]).map_elements(
+                        lambda x: matches_found.get(x["primary_company_name"].lower().strip(), x["domain"]),
+                        return_dtype=pl.Utf8
+                    ).alias("domain")
+                )
+                logger.info(f"Chunked scan completed. Found {len(matches_found)} new domains.")
+        
+        except Exception as e:
+            logger.error(f"Chunked scan failed: {e}")
 
     def run_stage_direct_join(self):
         """Ultra-fast exact name matching against global dataset."""
@@ -179,6 +240,9 @@ class MegaEnricher:
         lf_ref = self.ref_global.with_columns(clean_name(pl.col("ref_name")).alias("match_key")).select(["match_key", "ref_domain"])
         
         res = lf_data.join(lf_ref, on="match_key", how="left").collect()
+        
+        # FIX: Ensure we don't multiply rows if ref has duplicates
+        res = res.unique(subset=["canonical_id"], keep="first")
         
         self.df = res.with_columns(
             pl.coalesce([pl.col("domain"), pl.col("ref_domain")]).alias("domain")
@@ -209,37 +273,62 @@ class MegaEnricher:
                 ).alias("domain")
             )
 
-    async def run_stage_search_fallback(self, search_limit=300):
-        """Last resort: Async web search for entries still missing domains."""
-        logger.info("Stage 3: Async Web Search Fallback...")
-        # (Implementation same as previous robust search logic)
-        mask_missing = (pl.col("domain").is_null()) | (pl.col("domain") == "")
-        remaining = self.df.filter(mask_missing & (pl.col("primary_company_name").str.len_chars() > 5))
-        names_to_search = remaining["primary_company_name"].unique().head(search_limit).to_list()
-        
-        if not names_to_search: return
 
-        semaphore = asyncio.Semaphore(10)
-        async def fetch(name):
-            async with semaphore:
-                try:
-                    await asyncio.sleep(0.5) # Safer rate limit
-                    with DDGS() as ddgs:
-                        query = f"\"{name}\" automotive company official website"
-                        results = [r for r in ddgs.text(query, max_results=1)]
-                        return clean_domain(results[0].get('href')) if results else None
-                except: return None
-
-        logger.info(f"Searching for {len(names_to_search)} companies...")
-        results = await asyncio.gather(*[fetch(n) for n in names_to_search])
-        res_map = dict(zip(names_to_search, results))
+    def run_stage_domain_unification(self):
+        """
+        The Data Seal: 
+        Merges master clusters that share the same domain after enrichment.
+        """
+        logger.info("Stage 4: Post-Enrichment Domain Unification...")
+        mask_has_domain = (pl.col("domain").is_not_null()) & (pl.col("domain") != "")
+        df_rich = self.df.filter(mask_has_domain)
         
+        if df_rich.height == 0: return
+
+        # Group by domain to find potential merges
+        domain_groups = df_rich.group_by("domain").agg(pl.col("canonical_id")).filter(pl.col("canonical_id").list.len() > 1)
+        
+        if domain_groups.height == 0:
+            logger.info("No new domain-based merges found.")
+            return
+
+        logger.info(f"Found {domain_groups.height} domain groups requiring unification.")
+        
+        # Build a graph of canonical_ids that need to be merged
+        G = nx.Graph()
+        G.add_nodes_from(self.df["canonical_id"].to_list())
+        for row in domain_groups.iter_rows(named=True):
+            ids_to_merge = row["canonical_id"]
+            for i in range(len(ids_to_merge) - 1):
+                G.add_edge(ids_to_merge[i], ids_to_merge[i+1])
+        
+        # Recalculate clusters
+        new_clusters = list(nx.connected_components(G))
+        new_map = {cid: next(iter(ids)) for ids in new_clusters for cid in ids if len(ids) > 1}
+        
+        if not new_map: 
+            logger.info("No overlaps found in search results.")
+            return
+
+        # Apply unification and re-aggregate
+        before_count = self.df.height
         self.df = self.df.with_columns(
-            pl.struct(["primary_company_name", "domain"]).map_elements(
-                lambda x: res_map.get(x["primary_company_name"], x["domain"]) if (not x["domain"] or x["domain"] == "") else x["domain"],
-                return_dtype=pl.Utf8
-            ).alias("domain")
+            pl.col("canonical_id").map_dict(new_map, default=pl.col("canonical_id")).alias("canonical_id")
         )
+        
+        # Re-aggregate to collapse the newly merged clusters
+        self.df = self.df.group_by("canonical_id").agg([
+            pl.col("primary_company_name").mode().first(),
+            pl.col("aliases").flatten().unique(),
+            pl.col("record_count").sum(),
+            pl.col("operating_countries").flatten().unique(),
+            pl.col("domain").mode().first(),
+            pl.col("industry_tags").mode().first(),
+            pl.col("source_dataset").mode().first()
+        ])
+        
+        after_count = self.df.height
+        logger.info(f"Domain Unification complete. {before_count} -> {after_count} clusters.")
 
     def save(self):
         """Write current state to output, cleaning domains on the way."""
@@ -258,16 +347,20 @@ async def main():
     enricher.download_data()
     enricher.build_unified_reference()
     
-    # Stage 1: Fast Exact Match (Multi-Source Global)
+    # Stage 1: Fast Exact Match (Multi-Source Global - Kaggle Only)
     enricher.run_stage_direct_join()
+    enricher.save()
+    
+    # Stage 1.5: Chunked Scan (22M CSV Bulk)
+    enricher.run_stage_bulk_csv_chunked()
     enricher.save()
     
     # Stage 2: Precision Fuzzy Match (Automotive Subset)
     enricher.run_stage_fuzzy_automotive(threshold=94)
     enricher.save()
-    
-    # Stage 3: DDGS fallback
-    await enricher.run_stage_search_fallback(search_limit=500)
+
+    # Stage 3: Final Domain Unification
+    enricher.run_stage_domain_unification()
     enricher.save()
     
     logger.info("Mega-Enricher Flow Complete.")
