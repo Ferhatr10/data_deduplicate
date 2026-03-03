@@ -14,7 +14,7 @@ from functools import partial
 INPUT_PARQUET = "data/output/golden_table.parquet"
 OUTPUT_PARQUET = "data/output/enriched_golden_table.parquet"
 RAW_DIR = "data/raw"
-BULK_CSV_22M = os.path.join(RAW_DIR, "free_company_dataset (2).csv")
+BULK_CSV_22M = os.path.join(os.path.dirname(os.path.dirname(__file__)), "free_company_dataset (2).csv")
 
 # Kaggle Datasets
 KAGGE_7M = "peopledatalabssf/free-7-million-company-dataset"
@@ -130,7 +130,7 @@ class MegaEnricher:
         logger.info("Scanning bulk sources (22M + Kaggle) into Unified Reference...")
         
         # 1. Load 22M CSV
-        lf_22m = pl.scan_csv(BULK_CSV_22M, quote_char=None, truncate_ragged_lines=True, infer_schema_length=0).select([
+        lf_22m = pl.scan_csv(BULK_CSV_22M, quote_char=None, truncate_ragged_lines=True, infer_schema_length=0, encoding="utf8-lossy").select([
             pl.col("name").alias("ref_name"),
             pl.col("website").alias("ref_domain"),
             pl.col("industry").alias("ref_industry")
@@ -149,7 +149,7 @@ class MegaEnricher:
         csv_big = next(f for f in os.listdir(self.path_big) if f.endswith('.csv'))
         lf_big = pl.scan_csv(os.path.join(self.path_big, csv_big), infer_schema_length=0).select([
             pl.col("name").alias("ref_name"),
-            pl.col("domain").alias("ref_domain"),
+            pl.col("website").alias("ref_domain"),
             pl.col("industry").alias("ref_industry")
         ])
 

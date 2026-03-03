@@ -1,4 +1,11 @@
 splink>=4.0.0
 duckdb>=1.0.0
-pyarrow
+pyarrow>=10.0.1
 pandas
+polars
+kagglehub
+duckduckgo_search
+rapidfuzz
+lancedb
+sentence-transformers
+tantivy
