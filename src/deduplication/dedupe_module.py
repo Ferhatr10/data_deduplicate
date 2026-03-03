@@ -130,7 +130,7 @@ class DeduplicationLayer:
                 cluster_id as canonical_id,
                 MODE(company_name) as primary_company_name,
                 ARRAY_AGG(DISTINCT country) FILTER (WHERE country IS NOT NULL) as operating_countries,
-                LIST_FILTER(ARRAY_AGG(DISTINCT company_name), x -> x IS NOT NULL AND x <> MODE(company_name)) as aliases,
+                LIST_FILTER(ARRAY_AGG(DISTINCT original_name), x -> x IS NOT NULL AND LOWER(TRIM(x)) <> LOWER(TRIM(MODE(company_name)))) as aliases,
                 MODE(website) as primary_website,
                 count(*) as record_count
             FROM df_clustered

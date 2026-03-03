@@ -158,6 +158,7 @@ class ETLLayer:
         CREATE OR REPLACE TABLE standardized_suppliers AS
         SELECT 
             raw_id as unique_id,
+            raw_company_name as original_name,
             REGEXP_REPLACE(LOWER(TRIM(raw_company_name)), '\\s+', ' ', 'g') as company_name,
             REGEXP_REPLACE(LOWER(TRIM(raw_website)), '^(https?://)?(www\\.)?', '') as website,
             CASE 
