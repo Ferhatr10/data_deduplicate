@@ -9,3 +9,4 @@ rapidfuzz
 lancedb
 sentence-transformers
 tantivy
+polyfuzz

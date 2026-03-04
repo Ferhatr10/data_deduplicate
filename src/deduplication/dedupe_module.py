@@ -29,16 +29,29 @@ def normalize_company_name(name):
     dept_pattern = r'\s*-\s*automotive\s*division|\s+automotive\s+division|\s+automotive'
     n = re.sub(dept_pattern, '', n).strip()
     
-    # 3. Remove legal suffixes (Inc, Ltd, LLC, GmbH, AG, SA, Co, Corp, Group)
-    # Loop to ensure nested suffixes are handled (e.g., "Group Ltd")
-    suffix_pattern = r'\b(inc|ltd|llc|gmbh|ag|sa|co|corp|group|plc|solutions|as)\b\.*$'
+    # 3. Aggressive Suffix Stripping
+    # Combined pattern for legal forms, divisions, and generic noise
+    suffix_pattern = r'\b(inc|corp|corporation|ltd|limited|gmbh|sa|sg|ag|llc|co|kg|co\.?\s*kg|group|division|automotive|solutions|plc|as|ltd\.\s*sti|ticaret|sanayi|as|k\.s|bv|nv|sas|srl)\b'
+    
+    # 4. Remove department specific phrases
+    dept_patterns = [
+        r'-?\s*automotive\s*division',
+        r'-?\s*automotive',
+        r'\bco\.\s*kg\b',
+        r'\bltd\.?\s*şti\.?\b'
+    ]
+    
+    for p in dept_patterns:
+        n = re.sub(p, '', n, flags=re.IGNORECASE)
+    
+    # Repeatedly strip suffixes from the end
     prev_n = None
     while n != prev_n:
         prev_n = n
-        n = re.sub(suffix_pattern, '', n).strip()
-        n = n.rstrip('., ')
+        n = re.sub(suffix_pattern + r'\.*$', '', n, flags=re.IGNORECASE).strip()
+        n = n.rstrip('., /&-')
         
-    return n.upper() # Standardize to uppercase for consistency
+    return n.upper().strip()
 
 class DeduplicationLayer:
     def __init__(self, model_name='paraphrase-multilingual-MiniLM-L12-v2', similarity_threshold=0.88, batch_size=256):
@@ -63,7 +76,7 @@ class DeduplicationLayer:
         logger.info(f"Thresholds: Cosine Similarity > {self.similarity_threshold} (L2 Distance < {self.l2_threshold:.4f})")
         self.model = SentenceTransformer(model_name, device=self.device)
 
-    def generate_embeddings_with_cache(self, names, cache_path="data/embeddings_cache.npy"):
+    def generate_embeddings_with_cache(self, names, cache_path="data/cache/embeddings.npy"):
         """Loads embeddings from cache or generates them using the model."""
         if os.path.exists(cache_path):
             logger.info(f"Cache found! Loading from {cache_path}...")
@@ -83,7 +96,7 @@ class DeduplicationLayer:
         logger.info(f"Embeddings saved to {cache_path}.")
         return embeddings
 
-    def find_matches_sklearn(self, unique_ids, company_names, embeddings, k=10, match_cache="data/matches_cache.parquet"):
+    def find_matches_sklearn(self, unique_ids, company_names, embeddings, k=10, match_cache="data/cache/semantic_matches.parquet"):
         """
         Performs nearest neighbor search using BallTree and applies hybrid scoring.
         Semantic (Vector) + Lexical (RapidFuzz) validation.
@@ -194,11 +207,11 @@ class DeduplicationLayer:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         df.to_parquet(output_path, index=False)
         
-        golden_out = os.path.join(os.path.dirname(os.path.dirname(output_path)), "output", "golden_table.parquet")
+        golden_out = "data/03_deduplicated/entities.parquet"
         os.makedirs(os.path.dirname(golden_out), exist_ok=True)
         golden_table.to_parquet(golden_out, index=False)
         
-        logger.info(f"Deduplication complete! Golden Table available at: {golden_out}")
+        logger.info(f"Deduplication complete! Initial Entities available at: {golden_out}")
         
         if metrics:
             metrics.set_metric("dedupe_input_records", len(df))
@@ -210,7 +223,7 @@ class DeduplicationLayer:
 if __name__ == "__main__":
     layer = DeduplicationLayer(similarity_threshold=0.88)
     try:
-        layer.run_deduplication("data/processed/standardized.parquet", "data/processed/clusters.parquet")
+        layer.run_deduplication("data/02_standardized/firms.parquet", "data/03_deduplicated/clusters.parquet")
     except Exception as e:
         logger.error(f"Deduplication failed: {e}")
         raise e

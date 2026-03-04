@@ -12,10 +12,10 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 # --- CONFIGURATION ---
-INPUT_PARQUET = "data/output/refined_golden_table.parquet"
-OUTPUT_PARQUET = "data/output/enriched_golden_table.parquet"
-RAW_DIR = "data/raw"
-BULK_CSV_22M = os.path.join(RAW_DIR, "free_company_dataset (2).csv")
+INPUT_PARQUET = "data/03_deduplicated/refined_entities.parquet"
+OUTPUT_PARQUET = "data/04_golden/enriched.parquet"
+RAW_DIR = "data/01_raw"
+BULK_CSV_22M = os.path.join(RAW_DIR, "free_company_dataset.csv")
 
 # Kaggle Datasets
 KAGGE_7M = "peopledatalabssf/free-7-million-company-dataset"
@@ -169,11 +169,16 @@ class MegaEnricher:
 
     def run_stage_bulk_csv_chunked(self, chunk_size=3_000_000):
         """Memory-safe chunked scan of the 22M CSV for missing domains."""
+        if not os.path.exists(BULK_CSV_22M):
+            logger.warning(f"Bulk CSV not found at {BULK_CSV_22M}. Skipping Stage 1.5.")
+            return
+
         logger.info(f"Stage 1.5: Chunked Scan of 22M CSV (Chunk Size: {chunk_size})...")
         mask_missing = (pl.col("domain").is_null()) | (pl.col("domain") == "")
         missing_df = self.df.filter(mask_missing)
         
-        if missing_df.height == 0: return
+        if missing_df.height == 0:
+            return
         
         # Create a lookup map for missing names (clean -> original)
         missing_map = {n.lower().strip(): n for n in missing_df["primary_company_name"].to_list()}
@@ -191,7 +196,8 @@ class MegaEnricher:
             chunk_idx = 0
             while True:
                 batches = reader.next_batches(5) # 5 batches per iteration
-                if not batches: break
+                if not batches:
+                    break
                 
                 chunk_idx += 1
                 df_chunk = pl.concat(batches).select([
@@ -209,7 +215,8 @@ class MegaEnricher:
                         matches_found[key] = row["ref_domain"]
                 
                 # Early exit if all found
-                if len(matches_found) == len(missing_map): break
+                if len(matches_found) == len(missing_map):
+                    break
                 
                 if chunk_idx % 2 == 0:
                     logger.info(f"Processed ~{chunk_idx * 5}M rows... Found: {len(matches_found)}/{len(missing_map)}")
@@ -313,7 +320,7 @@ class MegaEnricher:
         # Apply unification and re-aggregate
         before_count = self.df.height
         self.df = self.df.with_columns(
-            pl.col("canonical_id").map_dict(new_map, default=pl.col("canonical_id")).alias("canonical_id")
+            pl.col("canonical_id").replace(new_map, default=pl.col("canonical_id")).alias("canonical_id")
         )
         
         # Re-aggregate to collapse the newly merged clusters
@@ -322,9 +329,7 @@ class MegaEnricher:
             pl.col("aliases").flatten().unique(),
             pl.col("record_count").sum(),
             pl.col("operating_countries").flatten().unique(),
-            pl.col("domain").mode().first(),
-            pl.col("industry_tags").mode().first(),
-            pl.col("source_dataset").mode().first()
+            pl.col("domain").mode().first()
         ])
         
         after_count = self.df.height
@@ -361,6 +366,13 @@ async def main():
 
     # Stage 3: Final Domain Unification
     enricher.run_stage_domain_unification()
+    enricher.save()
+    
+    # Stage 4: Logo Enrichment
+    from src.enrichment.logo_enrichment import LogoEnricher
+    logo_enricher = LogoEnricher()
+    logger.info("Starting Logo Enrichment...")
+    enricher.df = logo_enricher.enrich_dataframe(enricher.df)
     enricher.save()
     
     logger.info("Mega-Enricher Flow Complete.")

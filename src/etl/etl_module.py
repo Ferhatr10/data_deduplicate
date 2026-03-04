@@ -212,6 +212,6 @@ if __name__ == "__main__":
     etl = ETLLayer()
     # Assuming generate_test_data.py was run
     try:
-        etl.ingest_and_standardize("data/raw", "data/processed/standardized.parquet")
+        etl.ingest_and_standardize("data/01_raw", "data/02_standardized/firms.parquet")
     except Exception as e:
         logger.error(f"ETL failed: {e}")

@@ -13,8 +13,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-INPUT_PARQUET = "data/output/refined_golden_table.parquet"
-OUTPUT_PARQUET = "data/output/verified_golden_table.parquet"
+INPUT_PARQUET = "data/04_golden/enriched.parquet"
+OUTPUT_PARQUET = "data/04_golden/master.parquet"
 GEMINI_MODEL = "gemini-2.0-flash" 
 
 # Configure Gemini with environment variable
@@ -93,7 +93,7 @@ class CompanyVerifier:
             pl.col("description").fill_null("Information not found.")
         ]).select([
             "canonical_id", "primary_company_name", "domain", "description", 
-            "record_count", "operating_countries", "aliases", "industry_tags"
+            "record_count", "operating_countries", "aliases", "logo_url"
         ])
         
         self.df.write_parquet(OUTPUT_PARQUET)

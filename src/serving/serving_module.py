@@ -88,6 +88,6 @@ class ServingLayer:
 if __name__ == "__main__":
     serving = ServingLayer()
     try:
-        serving.generate_golden_table("data/processed/clusters.parquet", "data/output/golden_table.parquet")
+        serving.generate_golden_table("data/03_deduplicated/clusters.parquet", "data/03_deduplicated/entities.parquet")
     except Exception as e:
         logger.error(f"Serving failed: {e}")
