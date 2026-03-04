@@ -37,7 +37,7 @@ def clean_domain(url):
     try:
         if not isinstance(url, str): return None
         url = url.strip().lower()
-        if not url.startswith(('http://', 'htPostgreSQL’in ham veriyi içeri çekmek için kullandığı en optimize yöntemdir. Polars veya Pandas ile tek tek INSERTtps://')): url = 'http://' + url
+        if not url.startswith(('http://', 'https://')): url = 'http://' + url
         parsed = urlparse(url)
         domain = parsed.netloc
         if domain.startswith('www.'): domain = domain[4:]

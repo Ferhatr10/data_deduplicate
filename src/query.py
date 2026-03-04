@@ -46,11 +46,13 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
             domain, 
             COALESCE(description, 'N/A') as description,
             aliases,
-            COALESCE(record_count, 1) as record_count
+            COALESCE(record_count, 1) as record_count,
+            logo_url
         FROM read_parquet('{PARQUET_PATH}')
         WHERE 
             primary_company_name ILIKE '%{query}%' 
             OR array_to_string(aliases, ',') ILIKE '%{query}%'
+            OR domain ILIKE '%{query}%'
         LIMIT 20
     """
     
@@ -65,6 +67,7 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
         table.add_column("ID", justify="right", style="cyan")
         table.add_column("Company Name", style="white")
         table.add_column("Domain", style="green")
+        table.add_column("Logo", style="blue")
         table.add_column("Records", justify="right", style="yellow")
         table.add_column("Description", style="dim")
 
@@ -83,6 +86,7 @@ def search(query: str = typer.Argument(..., help="Company name to search for")):
                 row[0],
                 highlighted_name,
                 format_domain(row[2]),
+                f"[link={row[6]}]🔗[/link]" if row[6] else "[dim]-[/]",
                 f"{row[5]}",
                 row[3][:80] + "..." if len(row[3]) > 80 else row[3]
             )
@@ -105,7 +109,8 @@ def list_all(limit: int = typer.Option(20, help="Number of records to show")):
             domain, 
             COALESCE(description, 'N/A') as description,
             aliases,
-            COALESCE(record_count, 1) as record_count
+            COALESCE(record_count, 1) as record_count,
+            logo_url
         FROM read_parquet('{PARQUET_PATH}')
         LIMIT {limit}
     """
@@ -117,6 +122,7 @@ def list_all(limit: int = typer.Option(20, help="Number of records to show")):
         table.add_column("ID", justify="right", style="cyan")
         table.add_column("Company Name", style="white")
         table.add_column("Domain", style="green")
+        table.add_column("Logo", style="blue")
         table.add_column("Records", justify="right", style="yellow")
         table.add_column("Description", style="dim")
 
@@ -125,6 +131,7 @@ def list_all(limit: int = typer.Option(20, help="Number of records to show")):
                 row[0],
                 row[1],
                 format_domain(row[2]),
+                f"[link={row[6]}]🔗[/link]" if row[6] else "[dim]-[/]",
                 f"{row[5]}",
                 row[3][:80] + "..." if len(row[3]) > 80 else row[3]
             )
@@ -209,7 +216,10 @@ def inspect(canonical_id: str = typer.Argument(..., help="The canonical_id to in
         details = tree.add("[bold magenta]Attributes")
         for key, val in row_dict.items():
             if key not in ['primary_company_name', 'canonical_id']:
-                val_str = f"[green]{val}[/]" if val else "[dim red]N/A[/]"
+                if key == 'logo_url' and val:
+                    val_str = f"[link={val}][bold blue]🔗 {val}[/bold blue][/link]"
+                else:
+                    val_str = f"[green]{val}[/]" if val else "[dim red]N/A[/]"
                 details.add(f"{key}: {val_str}")
         
         console.print("\n", tree, "\n")

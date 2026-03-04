@@ -25,8 +25,8 @@ def run_second_pass(input_path, output_path):
     ids = df['temp_id'].tolist()
     names = df['primary_company_name'].tolist()
     
-    # 2. İsim Normalizasyonu
-    logger.info("Normalization applying...")
+    # 2. Name Normalization
+    logger.info("Applying normalization...")
     normalized_names = [normalize_company_name(n) for n in names]
 
     # 3. Use DeduplicationLayer for fuzzy matching
@@ -109,7 +109,7 @@ def run_second_pass(input_path, output_path):
     df['master_cluster_id'] = df['temp_id'].map(cluster_map)
     
     # 4. Final Aggregation
-    # Merging the already merged clusters
+    # Merge existing clusters based on new connections
     con.register("df_second_pass", df)
     
     # Check if record_count exists, if not default to 1
@@ -149,14 +149,14 @@ def run_second_pass(input_path, output_path):
             a_str = str(a).lower().strip()
             a_norm = normalize_company_name(a_str)
             
-            # Kural 1: Ana isimden farklı olmalı
+            # Rule 1: Must be different from primary name
             if a_str == p_name: continue
             
-            # Kural 2: Normalize hali ana ismin normalize halinden farklı olmalı
-            # (Bu sayede GmbH/Inc gibi farklar elenir)
+            # Rule 2: Normalized version must differ from primary normalized name
+            # (Removes GmbH/Inc/Ltd variations)
             if a_norm == p_norm: continue
             
-            # Kural 3: Harfsel olarak çok yakın olanları da ele (Levenshtein)
+            # Rule 3: Exclude very similar strings (Levenshtein distance <= 3)
             from rapidfuzz.distance import Levenshtein
             if Levenshtein.distance(a_str, p_name) <= 3: continue
             

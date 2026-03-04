@@ -6,6 +6,7 @@ from src.etl.etl_module import ETLLayer
 from src.deduplication.dedupe_module import DeduplicationLayer
 from src.deduplication.second_pass_dedupe import run_second_pass
 from src.serving.serving_module import ServingLayer
+from src.enrichment.logo_enrichment import LogoEnricher
 from src.utils.metrics import MetricsCollector
 
 # Configure logging
@@ -26,6 +27,7 @@ def run_pipeline():
     clusters_path = "data/processed/clusters.parquet"
     golden_table_path = "data/output/golden_table.parquet"
     refined_golden_table_path = "data/output/refined_golden_table.parquet"
+    verified_golden_table_path = "data/output/verified_golden_table.parquet"
 
     # 2. ETL Layer
     logger.info("=== STEP 1: ETL (Data Ingestion) ===")
@@ -38,20 +40,24 @@ def run_pipeline():
     # dedupe_module produces its own golden_table at data/output/golden_table.parquet
     dedupe.run_deduplication(standardized_path, clusters_path, metrics=metrics)
 
-    # 4. Serving Layer (Canonicalization)
-    logger.info("=== STEP 3: SERVING (Canonical Record Generation) ===")
-    serving = ServingLayer()
-    # It overwrites golden_table_path with more complete canonical records
-    serving.generate_golden_table(clusters_path, golden_table_path, metrics=metrics)
+    # 4. Serving Layer (Canonicalization) - SKIPPED FOR NOW
+    # logger.info("=== STEP 3: SERVING (Canonical Record Generation) ===")
+    # serving = ServingLayer()
+    # serving.generate_golden_table(clusters_path, golden_table_path, metrics=metrics)
     
     # 5. Second Pass Deduplication (Refinement)
-    logger.info("=== STEP 4: REFINED DEDUPLICATION (Second Pass - Suffix & Alias Optimization) ===")
+    logger.info("=== STEP 4: REFINED DEDUPLICATION (Second Pass) ===")
     run_second_pass(golden_table_path, refined_golden_table_path)
 
-    # 6. Finalize Metrics
+    # 6. Logo Enrichment
+    logger.info("=== STEP 5: LOGO ENRICHMENT (CompanyEnrich + Google Favicon) ===")
+    logo_enricher = LogoEnricher()
+    logo_enricher.enrich_parquet(refined_golden_table_path, verified_golden_table_path)
+
+    # 7. Finalize Metrics
     metrics.stop_timer("total_pipeline")
     logger.info("=== PIPELINE COMPLETE ===")
-    logger.info(f"Final Refined Output: {refined_golden_table_path}")
+    logger.info(f"Final Verified Output: {verified_golden_table_path}")
     
     # Log and save metrics
     metrics.log_summary()
