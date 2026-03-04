@@ -8,9 +8,37 @@ import math
 from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 import networkx as nx
+import re
+from rapidfuzz import fuzz
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def normalize_company_name(name):
+    """
+    Agresif şirket ismi temizliği (Entity Name Normalization).
+    Gereksiz departman eklerini ve yasal takıları siler.
+    """
+    if not name or not isinstance(name, str):
+        return ""
+    
+    # 1. Küçük harfe çevir ve temizle
+    n = name.lower().strip()
+    
+    # 2. Departman eklerini sil (Örn: " - automotive division", " automotive")
+    dept_pattern = r'\s*-\s*automotive\s*division|\s+automotive\s+division|\s+automotive'
+    n = re.sub(dept_pattern, '', n).strip()
+    
+    # 3. Yasal ekleri sil (Inc, Ltd, LLC, GmbH, AG, SA, Co, Corp, Group)
+    # Tekrarlanan ekleri de temizlemek için döngü kullanıyoruz (Örn: "Group Ltd")
+    suffix_pattern = r'\b(inc|ltd|llc|gmbh|ag|sa|co|corp|group|plc|solutions|as)\b\.*$'
+    prev_n = None
+    while n != prev_n:
+        prev_n = n
+        n = re.sub(suffix_pattern, '', n).strip()
+        n = n.rstrip('., ')
+        
+    return n.upper() # Tutarlılık için büyük harf dönüyoruz
 
 class DeduplicationLayer:
     def __init__(self, model_name='paraphrase-multilingual-MiniLM-L12-v2', similarity_threshold=0.88, batch_size=256):
@@ -55,8 +83,11 @@ class DeduplicationLayer:
         logger.info(f"Vektörler {cache_path} adresine kaydedildi.")
         return embeddings
 
-    def find_matches_sklearn(self, unique_ids, embeddings, k=5, match_cache="data/matches_cache.parquet"):
-        """Scikit-Learn NearestNeighbors (BallTree) kullanarak güvenli arama yapar. Cache desteği eklendi."""
+    def find_matches_sklearn(self, unique_ids, company_names, embeddings, k=10, match_cache="data/matches_cache.parquet"):
+        """
+        Scikit-Learn NearestNeighbors (BallTree) kullanarak arama yapar. 
+        Semantic (Vector) + Lexical (RapidFuzz) kalkanı uygulanır.
+        """
         
         # 0. EĞER ÖNCEDEN HESAPLANDIYSA DİSKTEN OKU
         if os.path.exists(match_cache):
@@ -85,8 +116,17 @@ class DeduplicationLayer:
                     if idx_r == -1 or idx_r >= n: continue
                     
                     id_l, id_r = unique_ids[i], unique_ids[idx_r]
-                    if id_l < id_r:
-                        match_pairs.append((id_l, id_r))
+                    name_l, name_r = company_names[i], company_names[idx_r]
+                    
+                    # KRİTİK ADIM: Lexical (Harfsel) Benzerlik Kontrolü
+                    # Cosine Similarity yetmez, harfler de benzemeli (Over-merging önleyici)
+                    lexical_sim = fuzz.token_sort_ratio(name_l, name_r)
+                    
+                    if lexical_sim > 81: # 80: AUTO PARTS vs MOTO PARTS çakışmasını önlemek için 81 seçildi
+                        if id_l < id_r:
+                            match_pairs.append((id_l, id_r))
+                    else:
+                        logger.debug(f"Over-merge önlendi: {name_l} <-> {name_r} (Semantic OK, Lexical FAIL: {lexical_sim})")
         
         # 5. BULUNANLARI KAYDET (BİR SONRAKİ HATA İÇİN ÖNLEM)
         os.makedirs(os.path.dirname(match_cache), exist_ok=True)
@@ -106,11 +146,15 @@ class DeduplicationLayer:
         unique_ids = df['unique_id'].tolist()
         company_names = df['company_name'].fillna('').tolist()
 
-        # 1. Vektörleri Al (Cache + MPS/GPU)
-        embeddings = self.generate_embeddings_with_cache(company_names)
+        # 1. İsim Normalizasyonu (Modelin kafasını karıştırmamak için)
+        logger.info("Şirket isimleri normalize ediliyor...")
+        normalized_names = [normalize_company_name(n) for n in company_names]
 
-        # 2. Scikit-Learn ile Arama
-        match_pairs = self.find_matches_sklearn(unique_ids, embeddings)
+        # 2. Vektörleri Al (Cache + MPS/GPU)
+        embeddings = self.generate_embeddings_with_cache(normalized_names)
+
+        # 3. Scikit-Learn + RapidFuzz ile Hibrit Arama
+        match_pairs = self.find_matches_sklearn(unique_ids, normalized_names, embeddings)
 
         # 3. Clustering (Gruplama)
         logger.info("NetworkX ile kümeler (clusters) oluşturuluyor...")
@@ -129,8 +173,16 @@ class DeduplicationLayer:
             SELECT 
                 cluster_id as canonical_id,
                 MODE(company_name) as primary_company_name,
+                -- Operating Countries: Tekilleştirilmiş Liste
                 ARRAY_AGG(DISTINCT country) FILTER (WHERE country IS NOT NULL) as operating_countries,
-                LIST_FILTER(ARRAY_AGG(DISTINCT original_name), x -> x IS NOT NULL AND LOWER(TRIM(x)) <> LOWER(TRIM(MODE(company_name)))) as aliases,
+                -- Aliases: Sadece gerçekten farklı olanları tut (Normalize hali ana isimden farklıysa)
+                LIST_FILTER(
+                    ARRAY_AGG(DISTINCT original_name), 
+                    x -> x IS NOT NULL AND 
+                         LOWER(TRIM(x)) <> LOWER(TRIM(MODE(company_name))) AND
+                         -- Çok benzer varyasyonları (GmbH/Inc farkı gibi) alias olarak ekleme
+                         levenshtein(LOWER(TRIM(x)), LOWER(TRIM(MODE(company_name)))) > 3
+                ) as aliases,
                 MODE(website) as primary_website,
                 count(*) as record_count
             FROM df_clustered

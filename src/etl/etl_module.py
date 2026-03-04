@@ -25,7 +25,7 @@ class ETLLayer:
         # CSV
         csv_files = [f for f in os.listdir(raw_data_dir) if f.endswith(".csv")]
         if csv_files:
-            queries.append(f"SELECT * FROM read_csv_auto('{raw_data_dir}/*.csv', header=True)")
+            queries.append(f"SELECT * FROM read_csv_auto('{raw_data_dir}/*.csv', header=True, ignore_errors=True, union_by_name=True)")
             file_counts["csv"] = len(csv_files)
             
         # JSONL
@@ -56,7 +56,7 @@ class ETLLayer:
 
         # CSV Processing
         if csv_files:
-            self.con.execute(f"CREATE OR REPLACE VIEW raw_csv AS SELECT * FROM read_csv_auto('{raw_data_dir}/*.csv', header=True, ALL_VARCHAR=True)")
+            self.con.execute(f"CREATE OR REPLACE VIEW raw_csv AS SELECT * FROM read_csv_auto('{raw_data_dir}/*.csv', header=True, ALL_VARCHAR=True, ignore_errors=True, union_by_name=True)")
             cols = get_cols('raw_csv')
             
             def safe(options, default="CAST(NULL AS VARCHAR)"):
